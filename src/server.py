@@ -8,6 +8,7 @@ Supports two credential modes:
 
 import os
 import json
+import base64
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -52,10 +53,13 @@ def get_credentials():
 
     creds = None
 
-    # Mode 1: Env var token (cloud/Horizon)
+    # Mode 1: Env var token (cloud/Horizon) - supports raw JSON or base64-encoded
     token_json = os.getenv('GOOGLE_DOCS_TOKEN_JSON')
     if token_json:
-        token_data = json.loads(token_json)
+        try:
+            token_data = json.loads(token_json)
+        except json.JSONDecodeError:
+            token_data = json.loads(base64.b64decode(token_json).decode())
         creds = Credentials.from_authorized_user_info(token_data, SCOPES)
         if not creds.valid and creds.expired and creds.refresh_token:
             creds.refresh(Request())
