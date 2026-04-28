@@ -23,7 +23,11 @@ SCOPES = ['https://www.googleapis.com/auth/documents']
 
 mcp = FastMCP(
     "Google Docs",
-    instructions="Use these tools to create, read, edit, and format Google Docs.",
+    instructions="Use these tools to create, read, edit, and format Google Docs. "
+    "Tools are tagged: 'read' for reading, 'write' for inserting/appending, "
+    "'format' for styling, 'table' for table operations, 'delete' for destructive actions.",
+    on_duplicate="warn",
+    mask_error_details=True,
 )
 
 _creds: Optional[Credentials] = None
@@ -45,14 +49,12 @@ def get_credentials():
     if _creds and _creds.valid:
         return _creds
 
-    # Try refreshing cached creds first
     if _creds and _creds.expired and _creds.refresh_token:
         _creds.refresh(Request())
         return _creds
 
     creds = None
 
-    # Mode 1: Env var token (cloud/Horizon) - supports raw JSON or base64-encoded
     token_json = os.getenv('GOOGLE_DOCS_TOKEN_JSON')
     if token_json:
         try:
@@ -65,7 +67,6 @@ def get_credentials():
         _creds = creds
         return creds
 
-    # Mode 2: File-based token (local dev)
     creds_dir = os.getenv('GDRIVE_CREDS_DIR', os.path.expanduser('~/.config/mcp-gdrive'))
     token_file = os.path.join(creds_dir, 'docs-token.json')
     credentials_file = os.path.join(creds_dir, 'gcp-oauth.keys.json')
@@ -77,7 +78,6 @@ def get_credentials():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # Browser-based flow - only works locally
             from google_auth_oauthlib.flow import InstalledAppFlow
             flow = InstalledAppFlow.from_client_secrets_file(credentials_file, SCOPES)
             creds = flow.run_local_server(port=0)
@@ -91,24 +91,30 @@ def get_credentials():
 
 
 def _get_service():
-    """Build the Google Docs API service."""
     return build('docs', 'v1', credentials=get_credentials())
 
 
-@mcp.tool
-def docs_create(title: str) -> str:
-    """Create a new Google Doc"""
+# --- Document CRUD ---
+
+@mcp.tool(
+    tags={"write", "create"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_create(title: str) -> dict:
+    """Create a new Google Doc. Returns the document ID and title."""
     service = _get_service()
     doc = service.documents().create(body={'title': title}).execute()
-    return json.dumps({
-        'documentId': doc['documentId'],
-        'title': doc['title']
-    }, indent=2)
+    return {'documentId': doc['documentId'], 'title': doc['title']}
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"read"},
+    timeout=30.0,
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
 def docs_read(document_id: str) -> str:
-    """Read content from a Google Doc"""
+    """Read all text content from a Google Doc."""
     service = _get_service()
     doc = service.documents().get(documentId=document_id).execute()
 
@@ -123,28 +129,42 @@ def docs_read(document_id: str) -> str:
     return ''.join(text)
 
 
-@mcp.tool
-def docs_insert_text(document_id: str, text: str, index: int = 1) -> str:
-    """Insert text at a specific position (default: 1, after title)"""
+@mcp.tool(
+    tags={"write"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_insert_text(document_id: str, text: str, index: int = 1) -> dict:
+    """Insert text at a specific position (default: 1, after title)."""
     service = _get_service()
     requests = [{'insertText': {'location': {'index': index}, 'text': text}}]
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True, 'documentId': document_id}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_append_text(document_id: str, text: str) -> str:
-    """Append text to the end of document"""
+@mcp.tool(
+    tags={"write"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_append_text(document_id: str, text: str) -> dict:
+    """Append text to the end of a document."""
     service = _get_service()
     doc = service.documents().get(documentId=document_id).execute()
     end_index = doc.get('body', {}).get('content', [{}])[-1].get('endIndex', 1)
 
     requests = [{'insertText': {'location': {'index': end_index - 1}, 'text': text}}]
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
+# --- Text Formatting ---
+
+@mcp.tool(
+    tags={"format"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
 def docs_format_text(
     document_id: str,
     start_index: int,
@@ -157,9 +177,8 @@ def docs_format_text(
     font_family: Optional[str] = None,
     text_color: Optional[str] = None,
     background_color: Optional[str] = None
-) -> str:
-    """Format text range (bold, italic, underline, strikethrough, font size, font family, colors).
-    Colors should be hex format like #FF0000"""
+) -> dict:
+    """Format a text range. Colors in hex format like #FF0000."""
     service = _get_service()
 
     text_style = {}
@@ -196,12 +215,16 @@ def docs_format_text(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_find_replace(document_id: str, find_text: str, replace_text: str) -> str:
-    """Find and replace text throughout document"""
+@mcp.tool(
+    tags={"write", "search"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_find_replace(document_id: str, find_text: str, replace_text: str) -> dict:
+    """Find and replace text throughout a document. Returns number of replacements."""
     service = _get_service()
 
     requests = [{
@@ -213,27 +236,23 @@ def docs_find_replace(document_id: str, find_text: str, replace_text: str) -> st
 
     result = service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
     occurrences = result.get('replies', [{}])[0].get('replaceAllText', {}).get('occurrencesChanged', 0)
-    return json.dumps({'replacements': occurrences}, indent=2)
+    return {'replacements': occurrences, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_insert_table(document_id: str, rows: int, columns: int, index: int = 1) -> str:
-    """Insert a table at specified position"""
-    service = _get_service()
-    requests = [{'insertTable': {'rows': rows, 'columns': columns, 'location': {'index': index}}}]
-    service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+# --- Paragraph Styles ---
 
-
-@mcp.tool
+@mcp.tool(
+    tags={"format"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
 def docs_set_paragraph_style(
     document_id: str,
     start_index: int,
     end_index: int,
     style: str = 'NORMAL_TEXT'
-) -> str:
-    """Set paragraph style for a range.
-    Styles: NORMAL_TEXT, HEADING_1, HEADING_2, HEADING_3, HEADING_4, HEADING_5, HEADING_6, TITLE, SUBTITLE"""
+) -> dict:
+    """Set paragraph style. Styles: NORMAL_TEXT, HEADING_1-6, TITLE, SUBTITLE."""
     service = _get_service()
 
     requests = [{
@@ -245,18 +264,21 @@ def docs_set_paragraph_style(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"format"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
 def docs_set_alignment(
     document_id: str,
     start_index: int,
     end_index: int,
     alignment: str = 'START'
-) -> str:
-    """Set paragraph alignment.
-    Alignment options: START (left), CENTER, END (right), JUSTIFIED"""
+) -> dict:
+    """Set paragraph alignment. Options: START (left), CENTER, END (right), JUSTIFIED."""
     service = _get_service()
 
     requests = [{
@@ -268,17 +290,21 @@ def docs_set_alignment(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"format"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
 def docs_set_line_spacing(
     document_id: str,
     start_index: int,
     end_index: int,
     line_spacing: float = 100.0
-) -> str:
-    """Set line spacing for paragraphs (percentage, e.g., 100 = single, 150 = 1.5, 200 = double)"""
+) -> dict:
+    """Set line spacing (percentage: 100=single, 150=1.5, 200=double)."""
     service = _get_service()
 
     requests = [{
@@ -290,18 +316,21 @@ def docs_set_line_spacing(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"format"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
 def docs_create_list(
     document_id: str,
     start_index: int,
     end_index: int,
     list_type: str = 'bulleted'
-) -> str:
-    """Create a bulleted or numbered list.
-    list_type options: 'bulleted' or 'numbered'"""
+) -> dict:
+    """Create a bulleted or numbered list. list_type: 'bulleted' or 'numbered'."""
     service = _get_service()
 
     requests = [{
@@ -312,39 +341,57 @@ def docs_create_list(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_delete_content(document_id: str, start_index: int, end_index: int) -> str:
-    """Delete content range from document"""
+# --- Insert Elements ---
+
+@mcp.tool(
+    tags={"write", "table"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_insert_table(document_id: str, rows: int, columns: int, index: int = 1) -> dict:
+    """Insert a table at the specified position."""
     service = _get_service()
-    requests = [{'deleteContentRange': {'range': {'startIndex': start_index, 'endIndex': end_index}}}]
+    requests = [{'insertTable': {'rows': rows, 'columns': columns, 'location': {'index': index}}}]
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True, 'deleted_chars': end_index - start_index}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_insert_image(document_id: str, uri: str, index: int = 1) -> str:
-    """Insert inline image from URL"""
+@mcp.tool(
+    tags={"write"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_insert_image(document_id: str, uri: str, index: int = 1) -> dict:
+    """Insert an inline image from a URL."""
     service = _get_service()
     requests = [{'insertInlineImage': {'location': {'index': index}, 'uri': uri}}]
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_insert_page_break(document_id: str, index: int = 1) -> str:
-    """Insert page break at position"""
+@mcp.tool(
+    tags={"write"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_insert_page_break(document_id: str, index: int = 1) -> dict:
+    """Insert a page break at the specified position."""
     service = _get_service()
     requests = [{'insertPageBreak': {'location': {'index': index}}}]
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_create_header(document_id: str, text: str) -> str:
-    """Create document header"""
+@mcp.tool(
+    tags={"write", "structure"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_create_header(document_id: str, text: str) -> dict:
+    """Create a document header with text."""
     service = _get_service()
 
     result = service.documents().batchUpdate(
@@ -359,12 +406,16 @@ def docs_create_header(document_id: str, text: str) -> str:
         body={'requests': [{'insertText': {'location': {'segmentId': header_id, 'index': 0}, 'text': text}}]}
     ).execute()
 
-    return json.dumps({'success': True, 'headerId': header_id}, indent=2)
+    return {'success': True, 'headerId': header_id, 'documentId': document_id}
 
 
-@mcp.tool
-def docs_create_footer(document_id: str, text: str) -> str:
-    """Create document footer"""
+@mcp.tool(
+    tags={"write", "structure"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
+def docs_create_footer(document_id: str, text: str) -> dict:
+    """Create a document footer with text."""
     service = _get_service()
 
     result = service.documents().batchUpdate(
@@ -379,17 +430,23 @@ def docs_create_footer(document_id: str, text: str) -> str:
         body={'requests': [{'insertText': {'location': {'segmentId': footer_id, 'index': 0}, 'text': text}}]}
     ).execute()
 
-    return json.dumps({'success': True, 'footerId': footer_id}, indent=2)
+    return {'success': True, 'footerId': footer_id, 'documentId': document_id}
 
 
-@mcp.tool
+# --- Table Operations ---
+
+@mcp.tool(
+    tags={"write", "table"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
 def docs_insert_table_row(
     document_id: str,
     table_start_index: int,
     row_index: int,
     insert_below: bool = True
-) -> str:
-    """Insert row in table"""
+) -> dict:
+    """Insert a row in a table."""
     service = _get_service()
 
     requests = [{
@@ -404,17 +461,21 @@ def docs_insert_table_row(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"write", "table"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+)
 def docs_insert_table_column(
     document_id: str,
     table_start_index: int,
     column_index: int,
     insert_right: bool = True
-) -> str:
-    """Insert column in table"""
+) -> dict:
+    """Insert a column in a table."""
     service = _get_service()
 
     requests = [{
@@ -429,16 +490,35 @@ def docs_insert_table_column(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
+# --- Destructive Operations ---
+
+@mcp.tool(
+    tags={"delete"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
+)
+def docs_delete_content(document_id: str, start_index: int, end_index: int) -> dict:
+    """Delete a content range from a document. This is destructive."""
+    service = _get_service()
+    requests = [{'deleteContentRange': {'range': {'startIndex': start_index, 'endIndex': end_index}}}]
+    service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
+    return {'success': True, 'deleted_chars': end_index - start_index, 'documentId': document_id}
+
+
+@mcp.tool(
+    tags={"delete", "table"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
+)
 def docs_delete_table_row(
     document_id: str,
     table_start_index: int,
     row_index: int
-) -> str:
-    """Delete table row"""
+) -> dict:
+    """Delete a table row. This is destructive."""
     service = _get_service()
 
     requests = [{
@@ -452,16 +532,20 @@ def docs_delete_table_row(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
-@mcp.tool
+@mcp.tool(
+    tags={"delete", "table"},
+    timeout=30.0,
+    annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
+)
 def docs_delete_table_column(
     document_id: str,
     table_start_index: int,
     column_index: int
-) -> str:
-    """Delete table column"""
+) -> dict:
+    """Delete a table column. This is destructive."""
     service = _get_service()
 
     requests = [{
@@ -475,7 +559,7 @@ def docs_delete_table_column(
     }]
 
     service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
-    return json.dumps({'success': True}, indent=2)
+    return {'success': True, 'documentId': document_id}
 
 
 if __name__ == "__main__":
