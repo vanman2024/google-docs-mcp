@@ -24,7 +24,6 @@ SCOPES = ['https://www.googleapis.com/auth/documents']
 mcp = FastMCP(
     "Google Docs",
     instructions="Use these tools to create, read, edit, and format Google Docs.",
-    stateless_http=True,
 )
 
 _creds: Optional[Credentials] = None

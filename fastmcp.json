@@ -14,7 +14,8 @@
     "port": 3000,
     "log_level": "INFO",
     "env": {
-      "GOOGLE_DOCS_TOKEN_JSON": "${GOOGLE_DOCS_TOKEN_JSON}"
+      "GOOGLE_DOCS_TOKEN_JSON": "${GOOGLE_DOCS_TOKEN_JSON}",
+      "FASTMCP_STATELESS_HTTP": "true"
     }
   }
 }
